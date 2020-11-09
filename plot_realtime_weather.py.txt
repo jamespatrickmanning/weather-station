@@ -1,0 +1,188 @@
+# plot weather data as telemetered
+#JiM 2016
+#JiM modified APril 2019 for ap3 data
+#JiM modified Nov 2019 to hardcode "uv='vessel_5' Lisa Ann
+import pandas as pd
+import numpy as np
+import matplotlib
+from matplotlib import pyplot as plt
+from matplotlib import dates
+from datetime import datetime as dt
+from matplotlib.dates import MONDAY
+from matplotlib.dates import MonthLocator, WeekdayLocator, DateFormatter
+from getap2s_functions import get_vessel_name
+import sys
+sys.path.append("/net/home3/ocn/jmanning/py/mygit/modules")
+import basemap as bm
+from utilities import haversine
+from conversions import mps2knots,c2f,uv2sd
+from models import get_ncep_single
+
+mondays = WeekdayLocator(MONDAY) # every monday
+weekFmt = dates.DateFormatter('%b %d')#,interval=2)
+months = MonthLocator(range(1, 13), bymonthday=2, interval=3)    # every interval months 
+monthsFmt = DateFormatter("%b '%y")
+
+wplot=0 # 0=just fishing boat where if you want just one boat hardcode unique vessel variable, "uv", below
+#wplot=1 # 1=make comparisons with weather buoys where I have already downloaded some buoy data
+#wplot=2 # 1=make comparisons with weather models
+#wplot=3 # both buoys and models
+
+if wplot!=0:
+  # read buoy weather
+  buoydata='44008_may_nov_2016.txt' # downloaded previously from http://www.ndbc.noaa.gov
+  blat=40.503
+  blon=-69.248
+  bd=pd.read_csv('/net/data5/jmanning/wind/raw/'+buoydata,delim_whitespace=True)
+  maxdist=500
+  bdatet=[]# buoy datetimes
+  for j in range(len(bd)):
+    bdatet.append(dt(bd["#YY"][j],bd["MM"][j],bd["DD"][j],bd["hh"][j],bd["mm"][j],0))
+
+matplotlib.rcParams.update({'font.size': 14})
+
+# read fishing boat weather
+#vessel,esn,mth,day,hr,mn,yd,lon,lat,alt,airt,humid,barop,u,v,year,at_dock_1
+#d=pd.read_csv('/net/pubweb_html/drifter/weather_ap3.dat')
+d=pd.read_csv('/net/pubweb_html/drifter/weather.dat')#form datetime
+datet,dist2b,bairt,bbarop,bwspd,mwspd,mbarop,mairt,airt_f=[],[],[],[],[],[],[],[],[]
+for k in range(len(d)): # for each record of fishing boat weather
+  datet.append(dt(d["year"][k],d["mth"][k],d["day"][k],d["hr"][k],d["mn"][k],0))
+  if d["barop"][k]<800.:
+    d["barop"][k]=np.nan
+  airt_f.append(c2f(d['airt'][k])[0]) #CONVERTING TO degF
+
+  if wplot!=0:
+    # calc distance from nearby buoy data at this time
+    if (wplot==1) or (wplot==3):
+      dist2b.append(haversine(d['lon'][k],d['lat'][k],blon,blat))
+      if dist2b[k]<maxdist:
+        idx = np.argmin(np.abs(np.array(bdatet)-datet[k]))# find the buoy times closest to the ship times
+        bwspd.append(mps2knots(bd['WSPD'][idx]))
+        bbarop.append(bd['PRES'][idx])
+        bairt.append(c2f(bd['ATMP'][idx])[0])
+        #bairt.append(bd['ATMP'][idx])
+      else:
+        bwspd.append(float('nan'))
+        bairt.append(float('nan'))
+        bbarop.append(float('nan'))
+
+    elif (wplot==2) or (wplot==3):#(WARNING: This takes a long time to extract wind from NCEP)
+      # extract model wind for all these postions and times 
+      [u,v,barop,airt]=get_ncep_single(d['lat'][k],d['lon'][k],datet[k])
+      [spd,direc]=uv2sd(u,v)
+      mwspd.append(spd)
+      # extract model barop and air t for all these postions and times
+      mbarop.append(barop)
+      mairt.append(airt)
+      
+# add to the dataframe
+
+if (wplot==1) or (wplot==3):
+      d['dist2b']=dist2b
+      d['bwspd']=bwspd
+      d['bairt']=bairt
+      d['bbarop']=bbarop
+
+if (wplot==2) or (wplot==3):
+      d['mwspd']=mwspd
+      d['mbarop']=mbarop
+      d['mairt']=mairt
+      d['datet']=datet
+
+d['airt_f']=airt_f # converted to degF earlier in the code
+d['datet']=datet
+
+#d=d.ix[d["stdtemp"]<5.0] #removes cases of wild temperatures
+d=d.ix[d["wspd"]<40.0] #removes cases of wild wspd
+d=d.ix[d["barop"]>800.]
+#d=d.ix[d["datet"]>dt(2019,10,23,0,0,0)]# added 18 Nov 2019 to zoom in on recent data
+#uv=list(np.unique(d["vessel"]))
+uv=['  Vessel_5']
+for j in range(len(uv)): # for each vessel make plots according to the "wplot" option
+    #air temp first
+    fig, ax1 = plt.subplots(3,sharex=True) # sets up a plot
+    ax1[0].plot(d[d["vessel"]==uv[j]]["datet"].values, d[d["vessel"]==uv[j]]["airt_f"].values,color='r',label=get_vessel_name(uv[j].strip()),linewidth=2)
+    if wplot!=0:
+      #ax1[0].plot(d[d["vessel"]==uv[j]]["datet"].values, d[d["vessel"]==uv[j]]["bairt"].values,color='g',label='"Nearby" NOAA Buoy',linewidth=2)
+      ax1[0].plot(d[d["vessel"]==uv[j]]["datet"].values, d[d["vessel"]==uv[j]]["mairt"].values,color='c',label='NWS/NCEP model',linewidth=2)
+    ax1[0].set_ylabel(r"Temperature ($^\circ$F)",color='k',fontsize=18)
+    ax1[0].set_title('Telemetered Weather from '+get_vessel_name(uv[j].strip()))
+    #ax1[0].legend(loc='lower right',fontsize=14)
+    length_of_time=(d[d["vessel"]==uv[j]]["datet"].values[-1]-d[d["vessel"]==uv[j]]["datet"].values[0]).astype('timedelta64[D]')/ np.timedelta64(1, 'D')
+    if length_of_time<300:
+        ax1[0].xaxis.set_major_locator(mondays)
+        ax1[0].xaxis.set_major_formatter(weekFmt)
+    else:
+        ax1[0].xaxis.set_major_locator(months)
+        ax1[0].xaxis.set_major_formatter(monthsFmt)
+    #barop pressure 2nd
+    ax1[1].plot(d[d["vessel"]==uv[j]]["datet"].values, d[d["vessel"]==uv[j]]["barop"].values,color='r',label='baroP',linewidth=2)
+    if wplot!=0:
+      #ax1[1].plot(d[d["vessel"]==uv[j]]["datet"].values, d[d["vessel"]==uv[j]]["bbarop"].values,color='g',label='buoy baroP',linewidth=2)
+      ax1[1].plot(d[d["vessel"]==uv[j]]["datet"].values, d[d["vessel"]==uv[j]]["mbarop"].values,color='c',label='model baroP',linewidth=2)
+    ax1[1].set_ylabel(r"Baro Pressure (PSI)",color='k',fontsize=18)
+    if length_of_time<300:
+        ax1[1].xaxis.set_major_locator(mondays)
+        ax1[1].xaxis.set_major_formatter(weekFmt)
+    else:
+        ax1[1].xaxis.set_major_locator(months)
+        ax1[1].xaxis.set_major_formatter(monthsFmt)
+    #wind spd 3rd
+    ax1[2].plot(d[d["vessel"]==uv[j]]["datet"].values, d[d["vessel"]==uv[j]]["wspd"].values,color='r',label='WindSpd',linewidth=2)
+    if wplot!=0:
+      #ax1[2].plot(d[d["vessel"]==uv[j]]["datet"].values, d[d["vessel"]==uv[j]]["bwspd"].values,color='g',label='Buoy WindSpd',linewidth=2)
+      ax1[2].plot(d[d["vessel"]==uv[j]]["datet"].values, d[d["vessel"]==uv[j]]["mwspd"].values,color='c',label='Model WindSpd',linewidth=2)
+    ax1[2].set_ylabel(r"Wind Speed (kts)",color='k',fontsize=18)
+    if length_of_time<300:
+        ax1[2].xaxis.set_major_locator(mondays)
+        ax1[2].xaxis.set_major_formatter(weekFmt)
+    else:
+        ax1[2].xaxis.set_major_locator(months)
+        ax1[2].xaxis.set_major_formatter(monthsFmt)
+    '''#humidity 4th
+    ax1[3].plot(d[d["vessel"]==uv[j]]["datet"].values, d[d["vessel"]==uv[j]]["humid"].values,color='r',label='humidity',linewidth=2)
+    ax1[3].set_ylabel(r"%humidity",color='k',fontsize=12)
+    #ax1[3].set_xlabel(str(d[d["vessel"]==uv[j]]["datet"][0].year),color='k',fontsize=16)
+    if length_of_time<60:
+        ax1[3].xaxis.set_major_locator(mondays)
+        ax1[3].xaxis.set_major_formatter(weekFmt)
+    else:
+        ax1[3].xaxis.set_major_locator(months)
+        ax1[3].xaxis.set_major_formatter(monthsFmt)
+    '''
+    '''#Distance from Buoy
+    ax1[3].plot(d[d["vessel"]==uv[j]]["datet"].values, d[d["vessel"]==uv[j]]["dist2b"].values,color='r',label='dist2b',linewidth=2)
+    ax1[3].set_ylabel(r"Distance away (km)",color='k',fontsize=10)
+    ax1[3].set_xlabel(str(d[d["vessel"]==uv[j]]["datet"][0].year),color='k',fontsize=16)
+    if length_of_time<120:
+        ax1[3].xaxis.set_major_locator(mondays)
+        ax1[3].xaxis.set_major_formatter(weekFmt)
+    else:
+        ax1[3].xaxis.set_major_locator(months)
+        ax1[3].xaxis.set_major_formatter(monthsFmt)
+    '''
+    plt.gcf().subplots_adjust(right=0.85)
+    fig.autofmt_xdate()
+    #plt.xlabel('2019')
+    plt.show()
+    if wplot==0:
+      plt.savefig('/net/pubweb_html/epd/oceanography/nws/'+uv[j][2:]+'_weather_ap3.png')
+      plt.savefig('/net/pubweb_html/epd/oceanography/nws/'+uv[j][2:]+'_weather_ap3.ps')
+    else:
+      plt.savefig('/net/pubweb_html/epd/oceanography/nws/'+uv[j][2:]+'_weather_comparison.png')
+      plt.savefig('/net/pubweb_html/epd/oceanography/nws/'+uv[j][2:]+'_weather_comparison.ps')
+    
+    # Add ship track
+    plt.figure()
+    m=bm.basemap_standard([np.floor(min(d[d["vessel"]==uv[j]]['lat'])),np.ceil(max(d[d["vessel"]==uv[j]]['lat']))],[np.floor(min(d[d["vessel"]==uv[j]]['lon'])),np.ceil(max(d[d["vessel"]==uv[j]]['lon']))],[3.0])# changed the last number from 2 to 3 on May 2019
+    #m=bm.basemap_usgs([np.floor(min(d[d["vessel"]==uv[j]]['lat'])),np.ceil(max(d[d["vessel"]==uv[j]]['lat']))],[np.floor(min(d[d["vessel"]==uv[j]]['lon'])),np.ceil(max(d[d["vessel"]==uv[j]]['lon']))],True,False,[-100.,-50.],[1.0],5)
+    x,y=m(d[d["vessel"]==uv[j]]['lon'].values,d[d["vessel"]==uv[j]]['lat'].values)
+    m.plot(x,y,'.r')
+    plt.title(uv[j][2:])
+    #plt.close('all')
+    plt.show()
+    plt.savefig('/net/pubweb_html/epd/oceanography/nws/'+uv[j][2:]+'_weather_locations_ap3.png')
+    plt.savefig('/net/pubweb_html/epd/oceanography/nws/'+uv[j][2:]+'_weather_locations_ap3.ps')
+
+
