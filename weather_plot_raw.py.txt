@@ -1,0 +1,161 @@
+# -*- coding: utf-8 -*-
+"""
+Created on Mon Mar 21 13:42:29 2016
+
+@author: bling originally called "weather_comeparision.py"
+
+modifications by JiM in April/May 2016
+-allows multiple input files
+-calculates speed from lat/lon
+
+modifications by JiM in Aug 2018 after another WHOI rooftop deployment by Huanxin
+- reads in weather-station-output180823.txt stored in "input_dir" after appending the Aug 24th file
+- makes plotting ship speed optional
+- adds other variables like air temp and barop pressure
+"""
+
+from pandas import *
+from numpy import *
+import matplotlib.pyplot as plt
+import matplotlib
+from datetime import datetime,timedelta 
+import sys
+sys.path.append('./mygit/modules')
+from conversions import ll2uv_datetime,cmps2knots,mps2knots,sd2uv,uv2sd,f2c # lat/lon to speed/dir function
+matplotlib.rcParams.update({'font.size': 18})
+
+#######################
+#  HARDCODES
+input_dir='/net/data5/jmanning/nws/'
+output_dir='/net/pubweb_html/epd/oceanography/nws/'
+other_sta_file='ARC-2018-08-28.txt' # where we get this from woodsholeweather.org recorded every 5 minutes
+#other_sta_file='none'
+#our_sta_file='weather-station2-output.txt'
+#our_sta_file='RV_Illusion_raw_spring_2016.txt'
+our_sta_file='weather-station-output180828.txt'# note: our data record every minute which this has subsequent day's file attached
+plot_ship_speed='no'
+plot_gust='no'
+
+def parse(datet,hrmn):
+   #print datet,hrmn
+   dt=datetime.strptime(datet[0:10],'%y/%m/%d')# normal format
+   delta=timedelta(hours=int(hrmn[0:2]),minutes=int(hrmn[3:5]),seconds=int(hrmn[6:8]))
+   return dt+delta
+
+# MAIN PROGRAM
+if other_sta_file!='none': # this is the case where we have other data to compare to
+  sdf=read_csv(input_dir+other_sta_file,sep='\t',skiprows=2,parse_dates={'datet':[0]},header=None,index_col='datet') #skip_footer=1
+  ou,ov=[],[]
+  for k in range(len(sdf)): # calculate u & v components
+    [ou1,ov1]=sd2uv(sdf[6][k],sdf[8][k])
+    ou.append(ou1)
+    ov.append(ov1)
+
+df=read_csv(input_dir+our_sta_file,sep=',',skiprows=0,parse_dates={'datet':[1,2]},date_parser=parse,header=None,index_col='datet') #skip_footer=1
+u,v=[],[]
+for k in range(len(df)): # calculate u & v components
+    [u1,v1]=sd2uv(df[3][k],df[4][k])
+    u.append(u1)
+    v.append(v1)
+
+mwind = []; hwind = []; dics = [] # initializes our mean wind, high wind, and direction
+if other_sta_file!='none': # We want to compare similar averages 
+  ind = argwhere((sdf.index>=df.index[0]) & (sdf.index<=df.index[-1])); #print ind
+  ind=ind.flatten()#JiM index of other wind data
+  ids = [] # ids becomes the index of the other weather data same as ours to the minute but that data is only available every X minutes
+  for i in sdf.index[ind]:
+    
+    ids.append(int(argwhere(df.index==i)))#'''
+
+  for i in ids:
+    if ids.index(i) == 0:
+        fv = mean(df[3][:i+1]) 
+        hv = max(df[3][:i+1])
+        #ds = mean(df[4][:i+1])
+        [ss,ds] = uv2sd(mean(u[:i+1]),mean(v[:i+1])) # gets mean direction ds
+        mwind.append(fv);hwind.append(hv);dics.append(ds)
+    else:
+        #fv = mean(df[3][i-5:i+1]) # takes the mean speed of our data over 5-minutes
+        #hv = max(df[3][i-5:i+1])  # calculates the "high" wind or gust
+        # to get mean direction, we first need to average all u & v and then find the resultant
+        #[ss,ds] = uv2sd(mean(u[i-5:i+1]),mean(v[i-5:i+1])) # gets mean direction ds
+        fv = mean(df[3][i-10:i+1]) # takes the mean speed of our data over 5-minutes
+        hv = max(df[3][i-10:i+1])  # calculates the "high" wind or gust
+        # to get mean direction, we first need to average all u & v and then find the resultant
+        [ss,ds] = uv2sd(mean(u[i-10:i+1]),mean(v[i-10:i+1])) # gets mean direction ds
+        mwind.append(fv);hwind.append(hv);dics.append(ds)
+else:
+    mwind=df[3]
+    hwind=df[3]# making gust the same as one-minute observed
+    dics=df[4]
+    lat=df[10]
+    lon=-1.0*df[11]
+    u,v,spd,ddt=ll2uv_datetime(df.index,lat,lon)
+
+#wind direction assumes we are comparing to something
+plt.figure()
+plt.title('Weather station wind direction comparision ')
+[moss,mods] = uv2sd(mean(ou),mean(ov))# mean direction of other wind source
+plt.plot(sdf.index[ind],sdf[8][ind],label='WHOI-direction ave %d'%mods,marker='.',color='b',linestyle='None')#,linewidth=4) 
+plt.plot(sdf.index[ind],dics,label='NOAA-direction ave %d'%mean(dics),marker='.',color='r',linestyle='None')#,linewidth=4) 
+plt.legend(loc=0) 
+plt.ylabel('Direction from')
+plt.xlabel('UTC time starting '+other_sta_file[4:14])     
+plt.gcf().autofmt_xdate()
+if other_sta_file!='none':
+  plt.title('Weather station wind direction comparison')
+  plt.savefig(output_dir+our_sta_file[0:11]+'_vs_other_wind_direction.png')
+else:
+  plt.title(our_sta_file[0:11])#'Weather Station wind direction')
+  plt.savefig(output_dir+our_sta_file[0:11]+'_direction.png')
+
+# Plot wind speed
+plt.figure()
+if other_sta_file!='none':
+  # converting WHOI wind from km/hr to knots?
+  #plt.plot(sdf.index[ind],(sdf[6][ind]/3600.)*1000./0.51444444,label='WHOI wind ave %.1f'%mean((sdf[6][ind]/3600.)*1000./0.51444444),linewidth=4)
+  #plt.plot(sdf.index[ind],(sdf[7][ind]/3600.)*1000./0.51444444,label='WHOI gust ave %.1f'%mean((sdf[7][ind]/3600.)*1000./0.51444444),linewidth=4)
+  #plt.plot(sdf.index[ind],sdf[6][ind]*0.51444444,label='WHOI wind ave %.1f'%mean(sdf[6][ind]*0.51444444),linewidth=4)
+  #plt.plot(sdf.index[ind],sdf[7][ind]*0.51444444,label='WHOI gust ave %.1f'%mean(sdf[7][ind]*0.51444444),linewidth=4)
+  plt.plot(sdf.index[ind],sdf[6][ind],label='WHOI wind ave %.1f'%mean(sdf[6][ind]),linewidth=2)
+  if plot_gust=='yes':
+    plt.plot(sdf.index[ind],sdf[7][ind],label='WHOI gust ave %.1f'%mean(sdf[7][ind]),linewidth=4)
+    plt.plot(sdf.index[ind],hwind,label='NOAA gust ave %.1f'%mean(hwind),linewidth=4)
+  plt.plot(sdf.index[ind],mwind,label='NOAA wind ave %.1f'%mean(mwind),linewidth=2)
+  plt.title('Weather station wind speed comparison')
+else: #case of no comparisons
+  plt.plot(df.index,mwind.values,label='wind_speed',linewidth=1,color='red')
+  if plot_ship_speed=='yes':
+    plt.plot(df.index[0:-1],cmps2knots(spd),label='ship_speed',linewidth=1,color='blue')
+  plt.title(our_sta_file[0:11])#'Weather Station wind speed')
+plt.gcf().autofmt_xdate()
+plt.legend(loc=0)
+plt.ylabel('Wind speed(kts)')
+plt.xlabel('UTC time starting '+other_sta_file[4:14])
+plt.show()
+if other_sta_file!='none':
+  plt.savefig(output_dir+our_sta_file[0:11]+'_vs_other_wind.png')
+else:
+  plt.savefig(output_dir+our_sta_file[0:11]+'.png')
+
+# Plot air temp
+plt.figure()
+if other_sta_file!='none':
+  plt.plot(sdf.index[ind],sdf[1][ind],label='WHOI airt ave %.1f'%mean(sdf[1][ind]),linewidth=4)
+  plt.title('Weather station air temp comparison')
+d14=[]
+for k in range(len(df)):
+  d14.append(c2f(df[6][k]))
+df[14]=d14
+plt.plot(df.index[ind],df[14][ind],label='airt',linewidth=1,color='red')
+#plt.title('Weather station air temp')#'Weather Station wind speed')
+plt.gcf().autofmt_xdate()
+plt.legend(loc=0)
+plt.ylabel('degC')
+plt.xlabel('UTC time starting '+other_sta_file[4:14])
+plt.show()
+if other_sta_file!='none':
+  plt.savefig(output_dir+our_sta_file[0:11]+'_vs_other_wind_airt.png')
+else:
+  plt.savefig(output_dir+our_sta_file[0:11]+'_airt.png')
+
